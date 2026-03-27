@@ -67,7 +67,7 @@ sudo bash install.sh
 3. 메인 스크립트 `/usr/local/bin/dhcp-toggle` 설치
 4. sudoers 설정 (pi 사용자 NOPASSWD)
 5. systemd 서비스 등록
-6. Web UI: Python venv 생성, FastAPI 설치, 서비스 자동 시작
+6. Web UI: pip3로 FastAPI 설치, 서비스 자동 시작
 
 ## 제거
 

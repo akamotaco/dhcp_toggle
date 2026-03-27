@@ -61,11 +61,9 @@ mkdir -p /var/lib/dhcp-toggle
 echo "[7/9] Web UI 파일 배포..."
 cp -r "$SCRIPT_DIR/webui" /usr/local/share/dhcp-toggle/
 
-# 8. Python venv 및 패키지 설치
-echo "[8/9] Python 가상환경 생성 및 패키지 설치..."
-python3 -m venv /usr/local/share/dhcp-toggle/webui/venv
-/usr/local/share/dhcp-toggle/webui/venv/bin/pip install --quiet \
-    -r /usr/local/share/dhcp-toggle/webui/requirements.txt
+# 8. Python 패키지 설치
+echo "[8/9] Python 패키지 설치..."
+pip3 install --quiet -r /usr/local/share/dhcp-toggle/webui/requirements.txt
 
 # 9. Web UI systemd 서비스
 echo "[9/9] Web UI 서비스 등록..."

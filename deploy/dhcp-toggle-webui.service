@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/usr/local/share/dhcp-toggle/webui
-ExecStart=/usr/local/share/dhcp-toggle/webui/venv/bin/python app.py
+ExecStart=/usr/bin/python3 app.py
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
