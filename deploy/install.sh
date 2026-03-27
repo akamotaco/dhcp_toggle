@@ -15,7 +15,7 @@ echo "=== dhcp-toggle 설치 시작 ==="
 
 # 1. 필요 패키지 설치
 echo "[1/9] 패키지 확인..."
-apt-get install -y iptables jq 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
+apt-get install -y iptables jq python3-pip 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
 
 # 2. dnsmasq 설정 디렉토리
 echo "[2/9] dnsmasq 설정 파일 배포..."
