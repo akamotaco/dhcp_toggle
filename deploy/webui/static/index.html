@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DHCP Toggle</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>DHCP Toggle</h1>
+  <nav>
+    <button class="tab active" data-tab="dashboard">대시보드</button>
+    <button class="tab" data-tab="clients">클라이언트</button>
+    <button class="tab" data-tab="forwards">포트포워딩</button>
+    <button class="tab" data-tab="logs">로그</button>
+    <button class="tab" data-tab="settings">설정</button>
+  </nav>
+</header>
+
+<main>
+  <!-- Dashboard -->
+  <section id="dashboard" class="panel active">
+    <div class="card">
+      <h2>현재 모드</h2>
+      <div id="current-mode" class="mode-display">-</div>
+      <div class="mode-buttons">
+        <button onclick="setMode('a')" class="btn btn-mode" id="btn-mode-a">모드 A<br><small>eth0=WAN, eth1=LAN</small></button>
+        <button onclick="setMode('b')" class="btn btn-mode" id="btn-mode-b">모드 B<br><small>wlan0=WAN, br0=LAN</small></button>
+        <button onclick="setMode('off')" class="btn btn-off" id="btn-mode-off">OFF<br><small>데스크톱 모드</small></button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>인터페이스</h2>
+      <table id="iface-table">
+        <thead><tr><th>인터페이스</th><th>상태</th><th>주소</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>요약</h2>
+      <div id="summary-info">
+        <span>IP 포워딩: <b id="ip-fwd">-</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Clients -->
+  <section id="clients" class="panel">
+    <div class="card">
+      <h2>DHCP 할당 클라이언트</h2>
+      <table id="dhcp-table">
+        <thead><tr><th>MAC</th><th>IP</th><th>호스트명</th><th>만료</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>ARP 테이블 (<span id="arp-iface">-</span>)</h2>
+      <table id="arp-table">
+        <thead><tr><th>IP</th><th>MAC</th><th>상태</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Forwards -->
+  <section id="forwards" class="panel">
+    <div class="card">
+      <h2>포트포워딩 규칙</h2>
+      <table id="fwd-table">
+        <thead><tr><th>이름</th><th>외부포트</th><th>내부IP</th><th>내부포트</th><th>프로토콜</th><th>상태</th><th>제어</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>규칙 추가</h2>
+      <form id="fwd-form" onsubmit="addForward(event)">
+        <div class="form-grid">
+          <label>이름<input type="text" id="fwd-name" placeholder="http_s" required pattern="[a-zA-Z0-9_-]+"></label>
+          <label>외부 포트<input type="text" id="fwd-ext" placeholder="80,443" required></label>
+          <label>내부 IP<input type="text" id="fwd-ip" placeholder="192.168.10.101" required></label>
+          <label>내부 포트<input type="text" id="fwd-int" placeholder="80,443" required></label>
+          <label>프로토콜
+            <select id="fwd-proto">
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+              <option value="both">Both</option>
+            </select>
+          </label>
+          <button type="submit" class="btn btn-add">추가</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- Logs -->
+  <section id="logs" class="panel">
+    <div class="card">
+      <div class="log-header">
+        <h2>동작 로그</h2>
+        <select id="log-lines" onchange="loadLogs()">
+          <option value="50">50줄</option>
+          <option value="100">100줄</option>
+          <option value="200">200줄</option>
+          <option value="500">500줄</option>
+        </select>
+      </div>
+      <pre id="log-output"></pre>
+    </div>
+  </section>
+</main>
+
+  <!-- Settings -->
+  <section id="settings" class="panel">
+    <div class="card">
+      <h2>Web UI 설정</h2>
+      <div class="settings-grid">
+        <div class="setting-row">
+          <span>서비스 상태</span>
+          <span id="webui-svc-status">-</span>
+        </div>
+        <div class="setting-row">
+          <span>활성화</span>
+          <span id="webui-enabled">-</span>
+          <div class="setting-actions">
+            <button class="btn btn-sm btn-enable" onclick="webuiToggle(true)">ON</button>
+            <button class="btn btn-sm btn-disable" onclick="webuiToggle(false)">OFF</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span>포트</span>
+          <div class="setting-inline">
+            <input type="number" id="webui-port" min="1" max="65535" style="width:100px">
+            <button class="btn btn-sm btn-add" onclick="webuiSetPort()">적용</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

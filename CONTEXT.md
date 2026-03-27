@@ -74,13 +74,50 @@ deploy/
 | dhcp-toggle.service | /etc/systemd/system/dhcp-toggle.service |
 | (런타임 생성) | /etc/dnsmasq.d/dhcp-active.conf |
 | (런타임 생성) | /var/lib/dhcp-toggle/mode |
+| (런타임 생성) | /var/lib/dhcp-toggle/forwards.json |
+| (런타임 생성) | /var/lib/dhcp-toggle/webui.json |
 | (런타임 생성) | /var/log/dhcp-toggle.log |
+| dhcp-toggle-webui.service | /etc/systemd/system/dhcp-toggle-webui.service |
+| webui/ | /usr/local/share/dhcp-toggle/webui/ |
+
+### 5차: 포트포워딩 + Web UI
+
+- 포트포워딩: 정책(named rule) 기반 — add/remove/enable/disable/list
+  - 포트 형식: 단일(80), 범위(8080-8090), 복수(80,443)
+  - 프로토콜: tcp, udp, both
+  - `/var/lib/dhcp-toggle/forwards.json`에 저장, 모드 전환 시 자동 복원
+  - iptables PREROUTING DNAT + FORWARD 규칙, comment 기반 관리
+
+- Web UI: FastAPI + 순수 HTML/CSS/JS (CDN 없음, 빌드 도구 없음)
+  - 직접 바인딩 (기본 포트 8080, `/var/lib/dhcp-toggle/webui.json`으로 변경 가능)
+  - 탭 구성: 대시보드(모드 전환) / 클라이언트 / 포트포워딩 / 로그
+  - subprocess로 `dhcp-toggle` CLI 호출하는 구조
+  - systemd 서비스: `dhcp-toggle-webui.service` (User=pi)
+  - 다크 테마, 모바일 반응형
+
+추가 파일:
+```
+deploy/
+├── dhcp-toggle-webui.service
+└── webui/
+    ├── app.py
+    ├── requirements.txt
+    ├── routers/
+    │   ├── mode.py
+    │   ├── forward.py
+    │   ├── clients.py
+    │   └── logs.py
+    └── static/
+        ├── index.html
+        ├── style.css
+        └── app.js
+```
 
 ## 현재 상태
 
-- 코드 작성 완료, tar.gz 패키징 완료
-- **아직 설치하지 않음** — sudo 비밀번호가 필요하여 사용자가 직접 실행해야 함
-- 테스트 미진행 (계획서 5단계)
+- 코드 작성 완료
+- **아직 재설치하지 않음** — sudo 비밀번호가 필요하여 사용자가 직접 실행해야 함
+- 테스트 미진행
 
 ## 알아둘 점
 

@@ -14,11 +14,11 @@ fi
 echo "=== dhcp-toggle 설치 시작 ==="
 
 # 1. 필요 패키지 설치
-echo "[1/6] 패키지 확인..."
-apt-get install -y iptables 2>/dev/null || echo "iptables 설치 실패 — 수동 설치 필요"
+echo "[1/9] 패키지 확인..."
+apt-get install -y iptables jq 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
 
 # 2. dnsmasq 설정 디렉토리
-echo "[2/6] dnsmasq 설정 파일 배포..."
+echo "[2/9] dnsmasq 설정 파일 배포..."
 mkdir -p /etc/dnsmasq.d
 mkdir -p /usr/local/share/dhcp-toggle
 cp "$SCRIPT_DIR/dhcp-mode-a.conf" /usr/local/share/dhcp-toggle/
@@ -34,12 +34,12 @@ elif ! grep -q "conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf; then
 fi
 
 # 3. 메인 스크립트 설치
-echo "[3/6] dhcp-toggle 스크립트 설치..."
+echo "[3/9] dhcp-toggle 스크립트 설치..."
 cp "$SCRIPT_DIR/dhcp-toggle" /usr/local/bin/dhcp-toggle
 chmod +x /usr/local/bin/dhcp-toggle
 
 # 4. sudoers 설정
-echo "[4/6] sudoers 설정..."
+echo "[4/9] sudoers 설정..."
 cp "$SCRIPT_DIR/dhcp-toggle.sudoers" /etc/sudoers.d/dhcp-toggle
 chmod 0440 /etc/sudoers.d/dhcp-toggle
 visudo -c -f /etc/sudoers.d/dhcp-toggle && echo "  sudoers 문법 확인 OK" || {
@@ -48,15 +48,31 @@ visudo -c -f /etc/sudoers.d/dhcp-toggle && echo "  sudoers 문법 확인 OK" || 
     exit 1
 }
 
-# 5. systemd 서비스
-echo "[5/6] systemd 서비스 등록..."
+# 5. systemd 서비스 (dhcp-toggle)
+echo "[5/9] systemd 서비스 등록..."
 cp "$SCRIPT_DIR/dhcp-toggle.service" /etc/systemd/system/
-systemctl daemon-reload
 echo "  부팅 시 자동 실행을 원하면: systemctl enable dhcp-toggle"
 
 # 6. 상태 디렉토리
-echo "[6/6] 상태 디렉토리 생성..."
+echo "[6/9] 상태 디렉토리 생성..."
 mkdir -p /var/lib/dhcp-toggle
+
+# 7. Web UI 파일 배포
+echo "[7/9] Web UI 파일 배포..."
+cp -r "$SCRIPT_DIR/webui" /usr/local/share/dhcp-toggle/
+
+# 8. Python venv 및 패키지 설치
+echo "[8/9] Python 가상환경 생성 및 패키지 설치..."
+python3 -m venv /usr/local/share/dhcp-toggle/webui/venv
+/usr/local/share/dhcp-toggle/webui/venv/bin/pip install --quiet \
+    -r /usr/local/share/dhcp-toggle/webui/requirements.txt
+
+# 9. Web UI systemd 서비스
+echo "[9/9] Web UI 서비스 등록..."
+cp "$SCRIPT_DIR/dhcp-toggle-webui.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now dhcp-toggle-webui
+echo "  Web UI 시작됨 (포트 8080)"
 
 echo ""
 echo "=== 설치 완료 ==="
@@ -66,3 +82,6 @@ echo "  sudo dhcp-toggle a        # 모드 A (eth0=WAN, eth1=LAN)"
 echo "  sudo dhcp-toggle b        # 모드 B (wlan0=WAN, eth0+eth1=LAN)"
 echo "  sudo dhcp-toggle off      # 해제"
 echo "  dhcp-toggle status        # 상태 확인"
+echo "  dhcp-toggle forward list  # 포트포워딩 목록"
+echo ""
+echo "Web UI: http://192.168.10.1:8080"

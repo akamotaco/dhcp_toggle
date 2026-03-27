@@ -7,9 +7,13 @@ set -euo pipefail
 CONF_DIR="/etc/dnsmasq.d"
 ACTIVE_CONF="$CONF_DIR/dhcp-active.conf"
 STATE_FILE="/var/lib/dhcp-toggle/mode"
+FORWARDS_FILE="/var/lib/dhcp-toggle/forwards.json"
+WEBUI_CONF="/var/lib/dhcp-toggle/webui.json"
+WEBUI_SERVICE="dhcp-toggle-webui"
 LOG_FILE="/var/log/dhcp-toggle.log"
 LAN_IP="192.168.10.1"
 LAN_MASK="24"
+LAN_SUBNET="192.168.10."
 
 # 색상
 RED='\033[0;31m'
@@ -69,6 +73,7 @@ cleanup() {
     rm -f "$ACTIVE_CONF"
 
     # iptables NAT 규칙 제거
+    iptables -t nat -F PREROUTING 2>/dev/null || true
     iptables -t nat -F POSTROUTING 2>/dev/null || true
     iptables -F FORWARD 2>/dev/null || true
 
@@ -116,6 +121,7 @@ mode_a() {
     iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     save_mode "a"
+    restore_forwards
     log_info "모드 A 활성화 완료"
 }
 
@@ -146,7 +152,491 @@ mode_b() {
     iptables -A FORWARD -i wlan0 -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     save_mode "b"
+    restore_forwards
     log_info "모드 B 활성화 완료"
+}
+
+# --- 포트포워딩 기능 ---
+
+get_wan_iface() {
+    local mode
+    mode=$(get_current_mode)
+    case "$mode" in
+        a) echo "eth0" ;;
+        b) echo "wlan0" ;;
+        *) echo "" ;;
+    esac
+}
+
+init_forwards_file() {
+    if [[ ! -f "$FORWARDS_FILE" ]]; then
+        mkdir -p "$(dirname "$FORWARDS_FILE")"
+        echo '[]' > "$FORWARDS_FILE"
+    fi
+}
+
+validate_port_spec() {
+    local spec="$1"
+    # 단일 포트, 범위(N-M), 복수(N,M,O) 허용
+    if [[ "$spec" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+        # 단일 또는 범위
+        local lo hi
+        lo="${spec%%-*}"
+        hi="${spec##*-}"
+        if (( lo < 1 || lo > 65535 || hi < 1 || hi > 65535 )); then
+            return 1
+        fi
+        if (( lo > hi )); then
+            return 1
+        fi
+        return 0
+    elif [[ "$spec" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
+        # 복수 포트
+        IFS=',' read -ra ports <<< "$spec"
+        for p in "${ports[@]}"; do
+            if (( p < 1 || p > 65535 )); then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    return 1
+}
+
+validate_ip() {
+    local ip="$1"
+    if [[ "$ip" =~ ^192\.168\.10\.([0-9]+)$ ]]; then
+        local last="${BASH_REMATCH[1]}"
+        if (( last >= 1 && last <= 254 )); then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# iptables용 포트 형식 변환: 80,443 → 80,443 / 8080-8090 → 8080:8090
+to_iptables_port() {
+    local spec="$1"
+    echo "${spec//-/:}"
+}
+
+apply_forward_rules() {
+    local name="$1" ext_ports="$2" int_ip="$3" int_ports="$4" proto="$5"
+    local wan_iface
+    wan_iface=$(get_wan_iface)
+    if [[ -z "$wan_iface" ]]; then
+        return 1
+    fi
+
+    local ipt_ext ipt_int
+    ipt_ext=$(to_iptables_port "$ext_ports")
+    ipt_int=$(to_iptables_port "$int_ports")
+
+    local protos=()
+    if [[ "$proto" == "both" ]]; then
+        protos=(tcp udp)
+    else
+        protos=("$proto")
+    fi
+
+    for p in "${protos[@]}"; do
+        if [[ "$ext_ports" == *","* ]]; then
+            # 복수 포트: multiport 사용, DNAT은 포트별로 적용 (동일 매핑)
+            iptables -t nat -A PREROUTING -i "$wan_iface" -p "$p" \
+                -m multiport --dports "$ipt_ext" \
+                -j DNAT --to-destination "$int_ip" \
+                -m comment --comment "fwd:$name" 2>/dev/null || true
+            iptables -A FORWARD -p "$p" -d "$int_ip" \
+                -m multiport --dports "$ipt_int" -j ACCEPT \
+                -m comment --comment "fwd:$name" 2>/dev/null || true
+        else
+            # 단일 포트 또는 범위
+            iptables -t nat -A PREROUTING -i "$wan_iface" -p "$p" \
+                --dport "$ipt_ext" \
+                -j DNAT --to-destination "${int_ip}:${ipt_int}" \
+                -m comment --comment "fwd:$name" 2>/dev/null || true
+            iptables -A FORWARD -p "$p" -d "$int_ip" \
+                --dport "$ipt_int" -j ACCEPT \
+                -m comment --comment "fwd:$name" 2>/dev/null || true
+        fi
+    done
+}
+
+remove_forward_rules() {
+    local name="$1"
+    # comment 기반으로 규칙 제거
+    while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "fwd:$name"; do
+        local line
+        line=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep "fwd:$name" | head -1 | awk '{print $1}')
+        iptables -t nat -D PREROUTING "$line" 2>/dev/null || break
+    done
+    while iptables -L FORWARD -n --line-numbers 2>/dev/null | grep -q "fwd:$name"; do
+        local line
+        line=$(iptables -L FORWARD -n --line-numbers 2>/dev/null | grep "fwd:$name" | head -1 | awk '{print $1}')
+        iptables -D FORWARD "$line" 2>/dev/null || break
+    done
+}
+
+restore_forwards() {
+    init_forwards_file
+    local count
+    count=$(jq 'length' "$FORWARDS_FILE")
+    if (( count == 0 )); then
+        return
+    fi
+
+    local applied=0
+    for i in $(seq 0 $((count - 1))); do
+        local enabled
+        enabled=$(jq -r ".[$i].enabled" "$FORWARDS_FILE")
+        if [[ "$enabled" != "true" ]]; then
+            continue
+        fi
+        local name ext_ports int_ip int_ports proto
+        name=$(jq -r ".[$i].name" "$FORWARDS_FILE")
+        ext_ports=$(jq -r ".[$i].ext_ports" "$FORWARDS_FILE")
+        int_ip=$(jq -r ".[$i].int_ip" "$FORWARDS_FILE")
+        int_ports=$(jq -r ".[$i].int_ports" "$FORWARDS_FILE")
+        proto=$(jq -r ".[$i].proto" "$FORWARDS_FILE")
+        apply_forward_rules "$name" "$ext_ports" "$int_ip" "$int_ports" "$proto"
+        ((applied++))
+    done
+    if (( applied > 0 )); then
+        log_info "포트포워딩 ${applied}개 규칙 복원 완료"
+    fi
+}
+
+forward_add() {
+    # forward add <name> <ext_ports> <int_ip> <int_ports> [proto]
+    local name="${1:-}" ext_ports="${2:-}" int_ip="${3:-}" int_ports="${4:-}" proto="${5:-tcp}"
+
+    if [[ -z "$name" || -z "$ext_ports" || -z "$int_ip" || -z "$int_ports" ]]; then
+        log_error "사용법: dhcp-toggle forward add <이름> <외부포트> <내부IP> <내부포트> [tcp|udp|both]"
+        echo "  예: dhcp-toggle forward add http_s 80,443 192.168.10.101 80,443 tcp"
+        echo "  예: dhcp-toggle forward add game 25565 192.168.10.102 25565 both"
+        echo "  예: dhcp-toggle forward add cams 8080-8090 192.168.10.103 8080-8090 tcp"
+        return 1
+    fi
+
+    # 이름 검증 (영문, 숫자, _, - 만 허용)
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        log_error "규칙 이름은 영문, 숫자, _, - 만 사용 가능합니다: $name"
+        return 1
+    fi
+
+    # 포트 검증
+    if ! validate_port_spec "$ext_ports"; then
+        log_error "잘못된 외부 포트 형식: $ext_ports"
+        return 1
+    fi
+    if ! validate_port_spec "$int_ports"; then
+        log_error "잘못된 내부 포트 형식: $int_ports"
+        return 1
+    fi
+
+    # IP 검증
+    if ! validate_ip "$int_ip"; then
+        log_error "내부 IP는 192.168.10.1~254 범위여야 합니다: $int_ip"
+        return 1
+    fi
+
+    # 프로토콜 검증
+    case "$proto" in
+        tcp|udp|both) ;;
+        *) log_error "프로토콜은 tcp, udp, both 중 하나: $proto"; return 1 ;;
+    esac
+
+    init_forwards_file
+
+    # 중복 이름 검사
+    if jq -e --arg n "$name" '.[] | select(.name == $n)' "$FORWARDS_FILE" >/dev/null 2>&1; then
+        log_error "이미 존재하는 규칙 이름: $name"
+        return 1
+    fi
+
+    # JSON에 추가
+    local tmp
+    tmp=$(jq --arg n "$name" --arg ep "$ext_ports" --arg ip "$int_ip" \
+             --arg ipt "$int_ports" --arg pr "$proto" \
+             '. + [{"name":$n,"ext_ports":$ep,"int_ip":$ip,"int_ports":$ipt,"proto":$pr,"enabled":true}]' \
+             "$FORWARDS_FILE")
+    echo "$tmp" > "$FORWARDS_FILE"
+
+    log_info "포트포워딩 규칙 추가: $name ($ext_ports → $int_ip:$int_ports/$proto)"
+
+    # 현재 모드가 활성이면 즉시 iptables 적용
+    local mode
+    mode=$(get_current_mode)
+    if [[ "$mode" != "off" ]]; then
+        apply_forward_rules "$name" "$ext_ports" "$int_ip" "$int_ports" "$proto"
+        log_info "iptables 규칙 즉시 적용됨"
+    else
+        log_warn "현재 off 모드 — 모드 전환 시 자동 적용됩니다"
+    fi
+}
+
+forward_remove() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        log_error "사용법: dhcp-toggle forward remove <이름>"
+        return 1
+    fi
+
+    init_forwards_file
+
+    if ! jq -e --arg n "$name" '.[] | select(.name == $n)' "$FORWARDS_FILE" >/dev/null 2>&1; then
+        log_error "존재하지 않는 규칙: $name"
+        return 1
+    fi
+
+    # iptables 규칙 제거
+    remove_forward_rules "$name"
+
+    # JSON에서 제거
+    local tmp
+    tmp=$(jq --arg n "$name" '[.[] | select(.name != $n)]' "$FORWARDS_FILE")
+    echo "$tmp" > "$FORWARDS_FILE"
+
+    log_info "포트포워딩 규칙 제거: $name"
+}
+
+forward_enable() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        log_error "사용법: dhcp-toggle forward enable <이름>"
+        return 1
+    fi
+
+    init_forwards_file
+
+    if ! jq -e --arg n "$name" '.[] | select(.name == $n)' "$FORWARDS_FILE" >/dev/null 2>&1; then
+        log_error "존재하지 않는 규칙: $name"
+        return 1
+    fi
+
+    local already
+    already=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .enabled' "$FORWARDS_FILE")
+    if [[ "$already" == "true" ]]; then
+        log_warn "이미 활성화된 규칙: $name"
+        return 0
+    fi
+
+    # JSON 업데이트
+    local tmp
+    tmp=$(jq --arg n "$name" '[.[] | if .name == $n then .enabled = true else . end]' "$FORWARDS_FILE")
+    echo "$tmp" > "$FORWARDS_FILE"
+
+    # 모드가 활성이면 iptables 적용
+    local mode
+    mode=$(get_current_mode)
+    if [[ "$mode" != "off" ]]; then
+        local ext_ports int_ip int_ports proto
+        ext_ports=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .ext_ports' <<< "$tmp")
+        int_ip=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .int_ip' <<< "$tmp")
+        int_ports=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .int_ports' <<< "$tmp")
+        proto=$(jq -r --arg n "$name" '.[] | select(.name == $n) | .proto' <<< "$tmp")
+        apply_forward_rules "$name" "$ext_ports" "$int_ip" "$int_ports" "$proto"
+    fi
+
+    log_info "포트포워딩 규칙 활성화: $name"
+}
+
+forward_disable() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        log_error "사용법: dhcp-toggle forward disable <이름>"
+        return 1
+    fi
+
+    init_forwards_file
+
+    if ! jq -e --arg n "$name" '.[] | select(.name == $n)' "$FORWARDS_FILE" >/dev/null 2>&1; then
+        log_error "존재하지 않는 규칙: $name"
+        return 1
+    fi
+
+    # iptables 규칙 제거
+    remove_forward_rules "$name"
+
+    # JSON 업데이트
+    local tmp
+    tmp=$(jq --arg n "$name" '[.[] | if .name == $n then .enabled = false else . end]' "$FORWARDS_FILE")
+    echo "$tmp" > "$FORWARDS_FILE"
+
+    log_info "포트포워딩 규칙 비활성화: $name"
+}
+
+forward_list() {
+    init_forwards_file
+    local count
+    count=$(jq 'length' "$FORWARDS_FILE")
+
+    echo "======================================"
+    echo " 포트포워딩 규칙 목록"
+    echo "======================================"
+
+    if (( count == 0 )); then
+        echo "(등록된 규칙 없음)"
+        echo "======================================"
+        return
+    fi
+
+    printf "%-15s %-8s %-14s %-18s %-14s %s\n" "이름" "상태" "외부포트" "내부IP" "내부포트" "프로토콜"
+    printf "%-15s %-8s %-14s %-18s %-14s %s\n" "―――――――――――" "――――" "――――――――――" "――――――――――――――" "――――――――――" "――――――"
+
+    for i in $(seq 0 $((count - 1))); do
+        local name ext_ports int_ip int_ports proto enabled status_mark
+        name=$(jq -r ".[$i].name" "$FORWARDS_FILE")
+        ext_ports=$(jq -r ".[$i].ext_ports" "$FORWARDS_FILE")
+        int_ip=$(jq -r ".[$i].int_ip" "$FORWARDS_FILE")
+        int_ports=$(jq -r ".[$i].int_ports" "$FORWARDS_FILE")
+        proto=$(jq -r ".[$i].proto" "$FORWARDS_FILE")
+        enabled=$(jq -r ".[$i].enabled" "$FORWARDS_FILE")
+
+        if [[ "$enabled" == "true" ]]; then
+            status_mark="ON"
+        else
+            status_mark="OFF"
+        fi
+
+        printf "%-15s %-8s %-14s %-18s %-14s %s\n" "$name" "$status_mark" "$ext_ports" "$int_ip" "$int_ports" "$proto"
+    done
+
+    echo "======================================"
+    echo "총 ${count}개 규칙"
+}
+
+handle_forward() {
+    local subcmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        add)
+            require_root
+            forward_add "$@"
+            ;;
+        remove|rm)
+            require_root
+            forward_remove "$@"
+            ;;
+        enable|on)
+            require_root
+            forward_enable "$@"
+            ;;
+        disable|off)
+            require_root
+            forward_disable "$@"
+            ;;
+        list|ls)
+            forward_list
+            ;;
+        *)
+            echo "사용법: dhcp-toggle forward {add|remove|enable|disable|list}"
+            echo ""
+            echo "  add <이름> <외부포트> <내부IP> <내부포트> [tcp|udp|both]"
+            echo "  remove <이름>"
+            echo "  enable <이름>"
+            echo "  disable <이름>"
+            echo "  list"
+            echo ""
+            echo "포트 형식:"
+            echo "  80          단일 포트"
+            echo "  8080-8090   포트 범위"
+            echo "  80,443      복수 포트"
+            ;;
+    esac
+}
+
+# --- WebUI 관리 ---
+
+init_webui_conf() {
+    if [[ ! -f "$WEBUI_CONF" ]]; then
+        mkdir -p "$(dirname "$WEBUI_CONF")"
+        echo '{"port": 8080, "enabled": true}' > "$WEBUI_CONF"
+    fi
+}
+
+webui_get() {
+    init_webui_conf
+    local key="$1"
+    jq -r ".$key" "$WEBUI_CONF"
+}
+
+webui_set() {
+    init_webui_conf
+    local key="$1" value="$2"
+    local tmp
+    tmp=$(jq --arg v "$value" ".$key = (\$v | if test(\"^[0-9]+$\") then tonumber elif . == \"true\" or . == \"false\" then . == \"true\" else . end)" "$WEBUI_CONF")
+    echo "$tmp" > "$WEBUI_CONF"
+}
+
+webui_restart_service() {
+    local enabled
+    enabled=$(webui_get "enabled")
+    if [[ "$enabled" == "true" ]]; then
+        systemctl restart "$WEBUI_SERVICE" 2>/dev/null || true
+    fi
+}
+
+handle_webui() {
+    local subcmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        on|enable)
+            require_root
+            webui_set "enabled" "true"
+            systemctl enable --now "$WEBUI_SERVICE" 2>/dev/null || true
+            log_info "Web UI 활성화됨 (포트: $(webui_get port))"
+            ;;
+        off|disable)
+            require_root
+            webui_set "enabled" "false"
+            systemctl disable --now "$WEBUI_SERVICE" 2>/dev/null || true
+            log_info "Web UI 비활성화됨"
+            ;;
+        port)
+            local new_port="${1:-}"
+            if [[ -z "$new_port" ]]; then
+                echo "현재 포트: $(webui_get port)"
+                return
+            fi
+            require_root
+            if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                log_error "잘못된 포트 번호: $new_port (1-65535)"
+                return 1
+            fi
+            webui_set "port" "$new_port"
+            webui_restart_service
+            log_info "Web UI 포트 변경: $new_port"
+            ;;
+        status|"")
+            init_webui_conf
+            local port enabled svc_status
+            port=$(webui_get "port")
+            enabled=$(webui_get "enabled")
+            svc_status=$(systemctl is-active "$WEBUI_SERVICE" 2>/dev/null || echo "inactive")
+
+            echo "=============================="
+            echo " Web UI 상태"
+            echo "=============================="
+            echo "설정 활성화: $enabled"
+            echo "포트:        $port"
+            echo "서비스:      $svc_status"
+            if [[ "$svc_status" == "active" ]]; then
+                echo "접속:        http://$(ip -4 addr show | grep "${LAN_IP}" | head -1 >/dev/null 2>&1 && echo "${LAN_IP}" || hostname -I | awk '{print $1}'):${port}"
+            fi
+            echo "=============================="
+            ;;
+        *)
+            echo "사용법: dhcp-toggle webui {on|off|port <N>|status}"
+            echo ""
+            echo "  on          Web UI 활성화 및 시작"
+            echo "  off         Web UI 비활성화 및 중지"
+            echo "  port <N>    포트 변경 (현재: $(webui_get port 2>/dev/null || echo 8080))"
+            echo "  status      Web UI 상태 확인"
+            ;;
+    esac
 }
 
 show_clients() {
@@ -226,6 +716,10 @@ show_status() {
         iptables -t nat -L POSTROUTING -n 2>/dev/null || echo "(iptables 없음)"
 
         echo ""
+        echo "--- 포트포워딩 (PREROUTING) ---"
+        iptables -t nat -L PREROUTING -n 2>/dev/null | grep -v "^Chain\|^target\|^$" || echo "(없음)"
+
+        echo ""
         echo "--- IP 포워딩 ---"
         sysctl net.ipv4.ip_forward
 
@@ -273,10 +767,28 @@ dhcp-toggle — DHCP 서버 모드 토글 스크립트
               - DHCP 리스 (할당된 IP/MAC/호스트명)
               - ARP 테이블 (실제 통신 중인 호스트)
 
+  forward     포트포워딩 규칙 관리
+    add <이름> <외부포트> <내부IP> <내부포트> [tcp|udp|both]
+    remove <이름>             규칙 삭제
+    enable <이름>             규칙 활성화
+    disable <이름>            규칙 비활성화
+    list                      규칙 목록
+
+  webui       Web UI 관리
+    on                        Web UI 활성화 및 시작
+    off                       Web UI 비활성화 및 중지
+    port <N>                  포트 변경
+    status                    Web UI 상태 확인
+
   log [N]     최근 로그 출력 (기본 50줄)
               로그 파일: /var/log/dhcp-toggle.log
 
   help        이 도움말 출력
+
+포트 형식:
+  80            단일 포트
+  8080-8090     포트 범위
+  80,443        복수 포트
 
 예제:
   sudo dhcp-toggle a          # 유선 라우터 모드 시작
@@ -286,6 +798,19 @@ dhcp-toggle — DHCP 서버 모드 토글 스크립트
   dhcp-toggle clients         # 접속 장치 확인
   dhcp-toggle log             # 최근 로그 50줄
   dhcp-toggle log 100         # 최근 로그 100줄
+
+  sudo dhcp-toggle forward add http_s 80,443 192.168.10.101 80,443 tcp
+  sudo dhcp-toggle forward add game 25565 192.168.10.102 25565 both
+  sudo dhcp-toggle forward add cams 8080-8090 192.168.10.103 8080-8090 tcp
+  sudo dhcp-toggle forward enable http_s
+  sudo dhcp-toggle forward disable http_s
+  sudo dhcp-toggle forward remove http_s
+  dhcp-toggle forward list
+
+  sudo dhcp-toggle webui on             # Web UI 시작
+  sudo dhcp-toggle webui off            # Web UI 중지
+  sudo dhcp-toggle webui port 9090      # 포트 변경
+  dhcp-toggle webui status              # Web UI 상태
 
 네트워크 구성:
   LAN IP:       192.168.10.1/24
@@ -298,6 +823,7 @@ dhcp-toggle — DHCP 서버 모드 토글 스크립트
   설정 파일:    /usr/local/share/dhcp-toggle/
   활성 설정:    /etc/dnsmasq.d/dhcp-active.conf
   상태 파일:    /var/lib/dhcp-toggle/mode
+  포워딩 설정:  /var/lib/dhcp-toggle/forwards.json
   로그 파일:    /var/log/dhcp-toggle.log
   systemd:      /etc/systemd/system/dhcp-toggle.service
 HELP
@@ -323,6 +849,14 @@ case "${1:-}" in
     status)
         show_status
         ;;
+    forward|fwd)
+        shift
+        handle_forward "$@"
+        ;;
+    webui)
+        shift
+        handle_webui "$@"
+        ;;
     clients)
         show_clients
         ;;
@@ -333,12 +867,14 @@ case "${1:-}" in
         show_help
         ;;
     *)
-        echo "사용법: dhcp-toggle {a|b|off|status|clients|log|help}"
+        echo "사용법: dhcp-toggle {a|b|off|status|forward|webui|clients|log|help}"
         echo ""
         echo "  a       — 모드 A: eth0=WAN, eth1=LAN (유선)"
         echo "  b       — 모드 B: wlan0=WAN, eth0+eth1=LAN (Wi-Fi)"
         echo "  off     — DHCP 서버 해제 (데스크톱 모드)"
         echo "  status  — 현재 상태 확인"
+        echo "  forward — 포트포워딩 규칙 관리 (add/remove/enable/disable/list)"
+        echo "  webui   — Web UI 관리 (on/off/port/status)"
         echo "  clients — 접속 클라이언트 목록"
         echo "  log [N] — 최근 로그 출력 (기본 50줄)"
         echo "  help    — 상세 도움말"
