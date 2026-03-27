@@ -1,0 +1,13 @@
+[Unit]
+Description=DHCP Toggle - 네트워크 모드 설정
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/dhcp-toggle off
+ExecStop=/usr/local/bin/dhcp-toggle off
+
+[Install]
+WantedBy=multi-user.target

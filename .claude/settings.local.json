@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ip link:*)",
+      "Bash(ip route:*)",
+      "Bash(dpkg -l)",
+      "Read(//etc/**)",
+      "Bash(dnsmasq --version)",
+      "Bash(iptables --version)",
+      "Bash(ip -br link show)",
+      "Bash(sudo apt-get:*)",
+      "Bash(sudo mkdir:*)"
+    ]
+  }
+}
