@@ -49,7 +49,7 @@ NanoPi R6S (aarch64) 용 DHCP 서버 모드 토글 도구.
 - iptables
 - iproute2 (`ip` 명령)
 - jq (포트포워딩 JSON 처리)
-- python3 + pip (Web UI)
+- python3-fastapi, python3-uvicorn (Web UI, apt 설치)
 
 ---
 
@@ -67,7 +67,7 @@ sudo bash install.sh
 3. 메인 스크립트 `/usr/local/bin/dhcp-toggle` 설치
 4. sudoers 설정 (pi 사용자 NOPASSWD)
 5. systemd 서비스 등록
-6. Web UI: pip3로 FastAPI 설치, 서비스 자동 시작
+6. Web UI: apt로 python3-fastapi/uvicorn 설치, 서비스 자동 시작
 
 ## 제거
 
@@ -198,7 +198,6 @@ deploy/
 ├── uninstall.sh                # 제거 스크립트
 └── webui/
     ├── app.py                  # FastAPI 메인 앱
-    ├── requirements.txt        # Python 패키지 (fastapi, uvicorn)
     ├── routers/
     │   ├── mode.py             # GET/POST /api/mode, /api/status
     │   ├── forward.py          # CRUD  /api/forwards
