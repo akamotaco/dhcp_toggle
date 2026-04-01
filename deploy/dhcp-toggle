@@ -111,9 +111,8 @@ mode_a() {
 
     # wlan은 건드리지 않음 — cleanup에서 이전 모드(c)의 NM 복원은 이미 처리됨
 
-    # eth0: WAN (DHCP client)
+    # eth0: WAN — NM이 관리하므로 별도 DHCP 불필요 (cleanup 후 자동 재취득)
     ip link set eth0 up
-    dhclient -nw eth0 2>/dev/null || log_warn "eth0 DHCP 클라이언트 시작 실패 (케이블 확인)"
 
     # eth1: LAN (고정 IP)
     ip link set eth1 up
@@ -175,6 +174,9 @@ mode_c() {
     log_info "모드 C 활성화: eth0=WAN, br0(eth1+wlan0 AP)=LAN"
 
     # NetworkManager에서 wlan 분리 (hostapd 충돌 방지)
+    # disconnect 먼저 — 기존 STA 연결을 명시적으로 끊어야 hostapd가 wlan0을 점유 가능
+    nmcli device disconnect wlan0 2>/dev/null || true
+    nmcli device disconnect wlan1 2>/dev/null || true
     nmcli device set wlan0 managed no 2>/dev/null || true
     nmcli device set wlan1 managed no 2>/dev/null || true
     ip link set wlan1 down 2>/dev/null || true
@@ -198,12 +200,16 @@ mode_c() {
     # hostapd 시작 (wlan0을 AP로 띄우고 br0에 자동 연결)
     ip link set wlan0 up
     cp "$HOSTAPD_CONF" /etc/hostapd/hostapd.conf
-    systemctl restart hostapd
+    systemctl unmask hostapd 2>/dev/null || true
+    if ! systemctl restart hostapd; then
+        log_error "hostapd 시작 실패 — 모드 C 중단, 정리 중..."
+        cleanup
+        exit 1
+    fi
     log_info "hostapd 시작 (wlan0 → AP)"
 
-    # eth0: WAN (DHCP client)
+    # eth0: WAN — NM이 관리하므로 별도 DHCP 불필요 (cleanup 후 자동 재취득)
     ip link set eth0 up
-    dhclient -nw eth0 2>/dev/null || log_warn "eth0 DHCP 클라이언트 시작 실패 (케이블 확인)"
 
     # dnsmasq 설정 활성화
     cp /usr/local/share/dhcp-toggle/dhcp-mode-c.conf "$ACTIVE_CONF"

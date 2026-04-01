@@ -17,7 +17,8 @@ echo "=== dhcp-toggle 설치 시작 ==="
 echo "[1/8] 패키지 확인..."
 apt-get install -y iptables jq hostapd python3-fastapi python3-uvicorn 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
 
-# hostapd 자동시작 비활성화 (dhcp-toggle이 직접 관리)
+# hostapd: unmask (Ubuntu 기본 masked) + 자동시작 비활성화 (dhcp-toggle이 직접 관리)
+systemctl unmask hostapd 2>/dev/null || true
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 
