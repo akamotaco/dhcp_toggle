@@ -78,12 +78,17 @@ cleanup() {
     iptables -t nat -F POSTROUTING 2>/dev/null || true
     iptables -F FORWARD 2>/dev/null || true
 
-    # 모드 C 정리: hostapd 정지 + wlan NM 복원
+    # 모드 C 정리: hostapd 정지 + wlan 리셋 + NM 복원
     if [[ "$current" == "c" ]]; then
         systemctl stop hostapd 2>/dev/null || true
         log_info "hostapd 정지 완료"
+        # down으로 AP 모드 상태를 리셋
+        ip link set wlan0 down 2>/dev/null || true
+        ip link set wlan1 down 2>/dev/null || true
+        # NM에 관리 복원 후 재시작 — NM이 인터페이스를 올리고 자동 재접속
         nmcli device set wlan0 managed yes 2>/dev/null || true
         nmcli device set wlan1 managed yes 2>/dev/null || true
+        systemctl restart NetworkManager 2>/dev/null || true
         log_info "wlan NetworkManager 복원 완료"
     fi
 
