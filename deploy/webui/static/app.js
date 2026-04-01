@@ -52,7 +52,7 @@ async function loadDashboard() {
     modeEl.className = "mode-display" + (status.mode === "off" ? " off" : "");
 
     // highlight active button
-    ["a", "b", "off"].forEach(m => {
+    ["a", "b", "c", "off"].forEach(m => {
       const btn = document.getElementById("btn-mode-" + m);
       btn.classList.toggle("active", status.mode === m);
     });

@@ -15,7 +15,11 @@ echo "=== dhcp-toggle 설치 시작 ==="
 
 # 1. 필요 패키지 설치
 echo "[1/8] 패키지 확인..."
-apt-get install -y iptables jq python3-fastapi python3-uvicorn 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
+apt-get install -y iptables jq hostapd python3-fastapi python3-uvicorn 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
+
+# hostapd 자동시작 비활성화 (dhcp-toggle이 직접 관리)
+systemctl disable hostapd 2>/dev/null || true
+systemctl stop hostapd 2>/dev/null || true
 
 # 2. dnsmasq 설정 디렉토리
 echo "[2/8] dnsmasq 설정 파일 배포..."
@@ -23,6 +27,9 @@ mkdir -p /etc/dnsmasq.d
 mkdir -p /usr/local/share/dhcp-toggle
 cp "$SCRIPT_DIR/dhcp-mode-a.conf" /usr/local/share/dhcp-toggle/
 cp "$SCRIPT_DIR/dhcp-mode-b.conf" /usr/local/share/dhcp-toggle/
+cp "$SCRIPT_DIR/dhcp-mode-c.conf" /usr/local/share/dhcp-toggle/
+cp "$SCRIPT_DIR/hostapd.conf" /usr/local/share/dhcp-toggle/
+mkdir -p /etc/hostapd
 cp "$SCRIPT_DIR/uninstall.sh" /usr/local/share/dhcp-toggle/
 chmod +x /usr/local/share/dhcp-toggle/uninstall.sh
 
@@ -74,6 +81,7 @@ echo ""
 echo "사용법:"
 echo "  sudo dhcp-toggle a        # 모드 A (eth0=WAN, eth1=LAN)"
 echo "  sudo dhcp-toggle b        # 모드 B (wlan0=WAN, eth0+eth1=LAN)"
+echo "  sudo dhcp-toggle c        # 모드 C (eth0=WAN, eth1+wlan0 AP=LAN)"
 echo "  sudo dhcp-toggle off      # 해제"
 echo "  dhcp-toggle status        # 상태 확인"
 echo "  dhcp-toggle forward list  # 포트포워딩 목록"

@@ -13,6 +13,7 @@ sudo bash deploy/install.sh
 # 모드 전환
 sudo dhcp-toggle a          # 유선 WAN 라우터 모드
 sudo dhcp-toggle b          # Wi-Fi WAN 라우터 모드
+sudo dhcp-toggle c          # AP 모드 (유선 WAN + Wi-Fi AP)
 sudo dhcp-toggle off        # 데스크톱 모드
 
 # 포트포워딩

@@ -69,6 +69,9 @@ deploy/
 | dhcp-toggle | /usr/local/bin/dhcp-toggle |
 | dhcp-mode-a.conf | /usr/local/share/dhcp-toggle/dhcp-mode-a.conf |
 | dhcp-mode-b.conf | /usr/local/share/dhcp-toggle/dhcp-mode-b.conf |
+| dhcp-mode-c.conf | /usr/local/share/dhcp-toggle/dhcp-mode-c.conf |
+| hostapd.conf | /usr/local/share/dhcp-toggle/hostapd.conf |
+| (런타임 복사) | /etc/hostapd/hostapd.conf |
 | uninstall.sh | /usr/local/share/dhcp-toggle/uninstall.sh |
 | dhcp-toggle.sudoers | /etc/sudoers.d/dhcp-toggle |
 | dhcp-toggle.service | /etc/systemd/system/dhcp-toggle.service |
@@ -111,6 +114,33 @@ deploy/
         ├── index.html
         ├── style.css
         └── app.js
+```
+
+### 6차: 기능 추가 — 모드 C (AP 모드)
+
+- 모드 C: eth0=WAN(DHCP client) → NAT → br0(eth1+wlan0 AP)=LAN
+- hostapd로 wlan0을 Wi-Fi AP로 동작시켜 유/무선 클라이언트 모두 지원
+- R6S WiFi 칩(RTL8822CS)은 싱글 라디오(phy0)에 wlan0/wlan1 가상 인터페이스 2개 구조
+  - 듀얼밴드(2.4/5GHz)이나 한 번에 한 밴드만 사용 가능
+  - wlan0 하나만 AP로 사용하는 것이 적합
+- NetworkManager 충돌 방지:
+  - mode b/c 진입 시 `nmcli device set wlan0/1 managed no`로 NM에서 분리
+  - mode a/off 복귀 시 `managed yes`로 복원 → 기존 WiFi(Orion 등) 자동 재접속
+- cleanup()에서 hostapd 정지 추가
+
+추가/수정 파일:
+```
+deploy/
+├── dhcp-mode-c.conf            # 모드 C dnsmasq 설정 (br0 바인딩)
+├── hostapd.conf                # hostapd 설정 (SSID, 비밀번호, 채널, WPA2)
+├── dhcp-toggle                 # mode_c() 추가, NM 관리 로직 추가
+├── install.sh                  # hostapd 패키지 + 설정 파일 배포
+└── webui/
+    ├── routers/mode.py         # "c" 모드 허용
+    ├── routers/clients.py      # mode c → br0 매핑
+    └── static/
+        ├── index.html          # 모드 C 버튼 추가
+        └── app.js              # 모드 C 버튼 하이라이트
 ```
 
 ## 현재 상태

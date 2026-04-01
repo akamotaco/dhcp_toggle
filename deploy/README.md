@@ -5,7 +5,7 @@ NanoPi R6S (aarch64) 용 DHCP 서버 모드 토글 도구.
 
 ## 기능 요약
 
-- **모드 전환**: 유선/Wi-Fi WAN 라우터 모드, 데스크톱 모드 간 원클릭 전환
+- **모드 전환**: 유선/Wi-Fi WAN/AP 라우터 모드, 데스크톱 모드 간 원클릭 전환
 - **포트포워딩**: 정책(named rule) 기반 DNAT 규칙 관리 (enable/disable 가능)
 - **Web UI**: 브라우저에서 모드 전환, 포워딩, 클라이언트 조회, 로그 확인
 - **클라이언트 조회**: DHCP 리스 + ARP 테이블 결합 출력
@@ -20,6 +20,7 @@ NanoPi R6S (aarch64) 용 DHCP 서버 모드 토글 도구.
 | `off` | — | — | DHCP 서버 비활성 (데스크톱 모드) |
 | `a` | eth0 (DHCP client) | eth1 (192.168.10.1/24) | 유선 WAN |
 | `b` | wlan0 | br0: eth0+eth1 (192.168.10.1/24) | Wi-Fi WAN |
+| `c` | eth0 (DHCP client) | br0: eth1+wlan0 AP (192.168.10.1/24) | AP 모드 |
 
 ### 모드 A: 유선 WAN
 ```
@@ -30,6 +31,13 @@ NanoPi R6S (aarch64) 용 DHCP 서버 모드 토글 도구.
 ```
 [인터넷] → wlan0 (WAN) → NAT → br0 [eth0 + eth1] (LAN, DHCP server)
 ```
+
+### 모드 C: AP 모드 (유선 WAN + Wi-Fi AP)
+```
+[인터넷] → eth0 (WAN, DHCP client) → NAT → br0 [eth1 + wlan0(AP)] (LAN, DHCP server)
+```
+hostapd로 wlan0을 AP로 동작시켜 유/무선 클라이언트 모두에게 LAN을 제공한다.
+AP 설정(SSID, 비밀번호, 채널 등)은 `/usr/local/share/dhcp-toggle/hostapd.conf`에서 수정 가능.
 
 ### 네트워크 설정
 
@@ -49,6 +57,7 @@ NanoPi R6S (aarch64) 용 DHCP 서버 모드 토글 도구.
 - iptables
 - iproute2 (`ip` 명령)
 - jq (포트포워딩 JSON 처리)
+- hostapd (모드 C Wi-Fi AP)
 - python3-fastapi, python3-uvicorn (Web UI, apt 설치)
 
 ---
@@ -62,8 +71,8 @@ sudo bash install.sh
 ```
 
 `install.sh`는 다음을 수행한다:
-1. 패키지 설치 (`iptables`, `jq`)
-2. dnsmasq 설정 파일 배포
+1. 패키지 설치 (`iptables`, `jq`, `hostapd`)
+2. dnsmasq/hostapd 설정 파일 배포
 3. 메인 스크립트 `/usr/local/bin/dhcp-toggle` 설치
 4. sudoers 설정 (pi 사용자 NOPASSWD)
 5. systemd 서비스 등록
@@ -84,6 +93,7 @@ sudo bash /usr/local/share/dhcp-toggle/uninstall.sh
 ```bash
 sudo dhcp-toggle a          # 모드 A 활성화 (eth0=WAN, eth1=LAN)
 sudo dhcp-toggle b          # 모드 B 활성화 (wlan0=WAN, eth0+eth1=LAN)
+sudo dhcp-toggle c          # 모드 C 활성화 (eth0=WAN, eth1+wlan0 AP=LAN)
 sudo dhcp-toggle off        # 전부 해제 (데스크톱 모드)
 dhcp-toggle status          # 현재 상태 확인 (sudo 불필요)
 ```
@@ -120,7 +130,7 @@ dhcp-toggle forward list
 
 **동작 방식:**
 - 규칙은 `/var/lib/dhcp-toggle/forwards.json`에 영구 저장
-- 모드 전환(a, b) 시 enabled 규칙이 자동 복원
+- 모드 전환(a, b, c) 시 enabled 규칙이 자동 복원
 - off 모드에서도 규칙 추가 가능 (모드 전환 시 적용)
 
 ### 클라이언트 조회
@@ -169,6 +179,9 @@ dhcp-toggle log 100         # 최근 100줄
 | `/usr/local/bin/dhcp-toggle` | 메인 토글 스크립트 |
 | `/usr/local/share/dhcp-toggle/dhcp-mode-a.conf` | 모드 A dnsmasq 설정 |
 | `/usr/local/share/dhcp-toggle/dhcp-mode-b.conf` | 모드 B dnsmasq 설정 |
+| `/usr/local/share/dhcp-toggle/dhcp-mode-c.conf` | 모드 C dnsmasq 설정 |
+| `/usr/local/share/dhcp-toggle/hostapd.conf` | 모드 C hostapd 설정 (SSID/비밀번호/채널) |
+| `/etc/hostapd/hostapd.conf` | hostapd 활성 설정 (런타임 복사) |
 | `/usr/local/share/dhcp-toggle/uninstall.sh` | 제거 스크립트 |
 | `/usr/local/share/dhcp-toggle/webui/` | Web UI (FastAPI + 정적 파일) |
 | `/etc/dnsmasq.d/dhcp-active.conf` | 활성 모드 설정 (런타임 생성) |
@@ -191,6 +204,8 @@ deploy/
 ├── dhcp-toggle                 # 메인 bash 스크립트 (모든 CLI 기능)
 ├── dhcp-mode-a.conf            # 모드 A dnsmasq 설정
 ├── dhcp-mode-b.conf            # 모드 B dnsmasq 설정
+├── dhcp-mode-c.conf            # 모드 C dnsmasq 설정
+├── hostapd.conf                # 모드 C hostapd 설정 (Wi-Fi AP)
 ├── dhcp-toggle.service         # DHCP 모드 systemd 서비스
 ├── dhcp-toggle-webui.service   # Web UI systemd 서비스
 ├── dhcp-toggle.sudoers         # sudoers 설정
@@ -220,11 +235,24 @@ deploy/
 ### 모드 전환 흐름
 
 ```
-dhcp-toggle a/b 실행
-  → cleanup()        # 이전 모드 정리: dnsmasq 정지, iptables 초기화, 브릿지 제거
-  → mode_a()/mode_b() # 인터페이스 설정, dnsmasq 설정 복사, NAT 규칙 추가
-  → restore_forwards() # forwards.json에서 enabled 규칙 iptables 적용
+dhcp-toggle a/b/c 실행
+  → cleanup()              # 이전 모드 정리: dnsmasq/hostapd 정지, iptables 초기화, 브릿지 제거
+  → mode_a()/mode_b()/mode_c()  # 인터페이스 설정, dnsmasq 설정 복사, NAT 규칙 추가
+  → restore_forwards()    # forwards.json에서 enabled 규칙 iptables 적용
 ```
+
+### NetworkManager와 wlan 관리
+
+R6S의 WiFi(RTL8822CS)는 싱글 라디오(phy0)에 wlan0/wlan1 가상 인터페이스 2개 구조다.
+듀얼밴드(2.4/5GHz)이나 한 번에 한 밴드만 사용 가능하며, wlan0/wlan1 모두 STA(클라이언트)로 사용 가능하다.
+
+wlan은 **모드 C 전환과 관련된 경우에만** 건드린다. 그 외 전환에서는 기존 WiFi 연결을 보존한다:
+
+| 전환 | wlan 처리 | 기존 WiFi 연결 |
+|------|-----------|----------------|
+| off/a/b 간 전환 | 안 건드림 | 유지 |
+| off/a/b → c | NM에서 분리 + hostapd 시작 | 끊김 (AP 전환) |
+| c → off/a/b | hostapd 정지 + NM 복원 | 자동 재접속 |
 
 ### iptables 규칙 구조
 
@@ -249,11 +277,11 @@ dhcp-toggle a/b 실행
 
 ## 커스터마이징: 새 모드 추가하기
 
-다른 장비나 다른 인터페이스 구성으로 "모드 C"를 추가하려면 아래 파일들을 수정한다.
+다른 장비나 다른 인터페이스 구성으로 새 모드를 추가하려면 아래 파일들을 수정한다.
 
 ### 1단계: dnsmasq 설정 파일 생성
 
-`deploy/dhcp-mode-c.conf` 생성:
+`deploy/dhcp-mode-<X>.conf` 생성:
 
 ```conf
 # DHCP 모드 C: <WAN설명>, <LAN설명>
@@ -291,11 +319,11 @@ LAN_MASK="24"
 ```
 모드 C가 다른 서브넷을 사용한다면 `mode_c()` 함수 안에서 직접 지정하면 된다.
 
-**(b) `mode_c()` 함수 추가 (`mode_b()` 아래)**
+**(b) 새 모드 함수 추가**
 
 ```bash
-mode_c() {
-    log_info "모드 C 활성화: <설명>"
+mode_x() {
+    log_info "모드 X 활성화: <설명>"
 
     # --- 인터페이스 설정 ---
     # WAN 인터페이스 UP + IP 획득
@@ -317,7 +345,7 @@ mode_c() {
     # ip addr add <LAN_IP>/<LAN_MASK> dev br0
 
     # --- dnsmasq 설정 활성화 ---
-    cp /usr/local/share/dhcp-toggle/dhcp-mode-c.conf "$ACTIVE_CONF"
+    cp /usr/local/share/dhcp-toggle/dhcp-mode-x.conf "$ACTIVE_CONF"
     systemctl restart dnsmasq
 
     # --- IP 포워딩 ---
@@ -328,87 +356,34 @@ mode_c() {
     iptables -A FORWARD -i <LAN인터페이스> -o <WAN인터페이스> -j ACCEPT
     iptables -A FORWARD -i <WAN인터페이스> -o <LAN인터페이스> -m state --state RELATED,ESTABLISHED -j ACCEPT
 
-    save_mode "c"
+    save_mode "x"
     restore_forwards
-    log_info "모드 C 활성화 완료"
+    log_info "모드 X 활성화 완료"
 }
 ```
 
-**(c) `get_wan_iface()`에 모드 C 추가**
-
-```bash
-get_wan_iface() {
-    local mode
-    mode=$(get_current_mode)
-    case "$mode" in
-        a) echo "eth0" ;;
-        b) echo "wlan0" ;;
-        c) echo "<WAN인터페이스>" ;;   # ← 추가
-        *) echo "" ;;
-    esac
-}
-```
+**(c) `get_wan_iface()`에 새 모드 추가**
 
 **(d) `show_clients()`의 LAN 인터페이스 매핑 추가**
 
-```bash
-case "$mode" in
-    a) lan_iface="eth1" ;;
-    b) lan_iface="br0" ;;
-    c) lan_iface="<LAN인터페이스>" ;;   # ← 추가
-esac
-```
+**(e) `cleanup()` 수정** — 새 모드에서 사용하는 인터페이스 정리 로직 추가
 
-**(e) `cleanup()` 수정**
-
-브릿지나 추가 인터페이스를 사용한다면 `cleanup()`에 정리 로직 추가:
-```bash
-# 모드 C 정리가 필요하면 여기에 추가
-ip addr flush dev <추가인터페이스> 2>/dev/null || true
-```
-
-**(f) main case문에 모드 C 추가**
-
-```bash
-c)
-    require_root
-    cleanup
-    mode_c
-    ;;
-```
+**(f) main case문에 새 모드 추가**
 
 ### 3단계: install.sh 수정
 
-`install.sh`에 새 설정 파일 복사 추가:
-```bash
-cp "$SCRIPT_DIR/dhcp-mode-c.conf" /usr/local/share/dhcp-toggle/
-```
+`install.sh`에 새 설정 파일 복사 추가.
 
 ### 4단계: (선택) Web UI 모드 버튼 추가
 
-`webui/static/index.html`에 버튼 추가:
-```html
-<button onclick="setMode('c')" class="btn btn-mode" id="btn-mode-c">
-  모드 C<br><small>설명</small>
-</button>
-```
-
-`webui/routers/mode.py`에서 허용 모드 추가:
-```python
-if req.mode not in ("a", "b", "c", "off"):
-```
-
-`webui/static/app.js`에서 버튼 하이라이트 추가:
-```javascript
-["a", "b", "c", "off"].forEach(m => { ... });
-```
+`webui/static/index.html`에 버튼, `webui/routers/mode.py`에 허용 모드, `webui/static/app.js`에 버튼 하이라이트를 각각 추가.
 
 ### 수정 요약 체크리스트
 
 | 파일 | 수정 내용 |
 |------|-----------|
-| `deploy/dhcp-mode-c.conf` | **신규** — dnsmasq 설정 |
-| `deploy/dhcp-toggle` | `mode_c()` 함수, `get_wan_iface()`, `show_clients()`, `cleanup()`, main case |
+| `deploy/dhcp-mode-<X>.conf` | **신규** — dnsmasq 설정 |
+| `deploy/dhcp-toggle` | 모드 함수, `get_wan_iface()`, `show_clients()`, `cleanup()`, main case |
 | `deploy/install.sh` | conf 파일 복사 추가 |
 | `webui/static/index.html` | 모드 버튼 추가 (선택) |
 | `webui/routers/mode.py` | 허용 모드 추가 (선택) |

@@ -33,8 +33,8 @@ def get_mode():
 
 @router.post("/mode")
 def set_mode(req: ModeRequest):
-    if req.mode not in ("a", "b", "off"):
-        raise HTTPException(status_code=400, detail="모드는 a, b, off 중 하나")
+    if req.mode not in ("a", "b", "c", "off"):
+        raise HTTPException(status_code=400, detail="모드는 a, b, c, off 중 하나")
     run_cmd(["sudo", TOGGLE_CMD, req.mode])
     return {"mode": req.mode, "message": f"모드 {req.mode} 전환 완료"}
 

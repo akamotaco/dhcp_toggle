@@ -22,7 +22,7 @@ def get_clients():
     if mode == "off":
         return {"mode": mode, "dhcp": [], "arp": []}
 
-    lan_iface = "eth1" if mode == "a" else "br0"
+    lan_iface = "eth1" if mode == "a" else "br0"  # b, c 모두 br0
 
     # DHCP leases
     dhcp = []
