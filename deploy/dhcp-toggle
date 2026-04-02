@@ -1,8 +1,24 @@
 #!/bin/bash
 # dhcp-toggle — DHCP 서버 모드 토글 스크립트
-# 사용법: dhcp-toggle {a|b|off|status}
+# 사용법: dhcp-toggle {a|b|c|off|status|forward|webui|clients|log|help}
 
 set -euo pipefail
+
+# --- 설정 파일 로드 ---
+CONFIG_FILE="/etc/dhcp-toggle/config"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "ERROR: 설정 파일이 없습니다: $CONFIG_FILE"
+    echo "install.sh를 먼저 실행하세요."
+    exit 1
+fi
+source "$CONFIG_FILE"
+
+# 설정 파일에서 로드되는 변수:
+#   IF_WAN0    — 첫 번째 유선 인터페이스 (WAN용, 구 eth0)
+#   IF_LAN0    — 두 번째 유선 인터페이스 (LAN용, 구 eth1)
+#   IF_WLAN0   — 무선 인터페이스 (구 wlan0)
+#   IF_WLAN1   — 보조 무선 인터페이스 (구 wlan1, 없으면 빈값)
+#   RUN_USER   — 실행 사용자 (구 pi)
 
 CONF_DIR="/etc/dnsmasq.d"
 ACTIVE_CONF="$CONF_DIR/dhcp-active.conf"
@@ -82,28 +98,26 @@ cleanup() {
     if [[ "$current" == "c" ]]; then
         systemctl stop hostapd 2>/dev/null || true
         log_info "hostapd 정지 완료"
-        # down으로 AP 모드 상태를 리셋
-        ip link set wlan0 down 2>/dev/null || true
-        ip link set wlan1 down 2>/dev/null || true
-        # NM에 관리 복원 후 재시작 — NM이 인터페이스를 올리고 자동 재접속
-        nmcli device set wlan0 managed yes 2>/dev/null || true
-        nmcli device set wlan1 managed yes 2>/dev/null || true
+        ip link set "$IF_WLAN0" down 2>/dev/null || true
+        [[ -n "${IF_WLAN1:-}" ]] && ip link set "$IF_WLAN1" down 2>/dev/null || true
+        nmcli device set "$IF_WLAN0" managed yes 2>/dev/null || true
+        [[ -n "${IF_WLAN1:-}" ]] && nmcli device set "$IF_WLAN1" managed yes 2>/dev/null || true
         systemctl restart NetworkManager 2>/dev/null || true
         log_info "wlan NetworkManager 복원 완료"
     fi
 
     # 브릿지 제거 (모드 B/C 정리)
     if ip link show br0 &>/dev/null; then
-        ip link set eth0 nomaster 2>/dev/null || true
-        ip link set eth1 nomaster 2>/dev/null || true
+        ip link set "$IF_WAN0" nomaster 2>/dev/null || true
+        ip link set "$IF_LAN0" nomaster 2>/dev/null || true
         ip link set br0 down 2>/dev/null || true
         ip link delete br0 2>/dev/null || true
         log_info "br0 브릿지 제거 완료"
     fi
 
     # 인터페이스 IP 제거 (wlan은 건드리지 않음 — NM이 관리)
-    ip addr flush dev eth0 2>/dev/null || true
-    ip addr flush dev eth1 2>/dev/null || true
+    ip addr flush dev "$IF_WAN0" 2>/dev/null || true
+    ip addr flush dev "$IF_LAN0" 2>/dev/null || true
 
     # IP 포워딩 비활성
     sysctl -q net.ipv4.ip_forward=0
@@ -112,29 +126,26 @@ cleanup() {
 }
 
 mode_a() {
-    log_info "모드 A 활성화: eth0=WAN, eth1=LAN"
+    log_info "모드 A 활성화: ${IF_WAN0}=WAN, ${IF_LAN0}=LAN"
 
-    # wlan은 건드리지 않음 — cleanup에서 이전 모드(c)의 NM 복원은 이미 처리됨
+    # WAN — NM이 관리하므로 별도 DHCP 불필요 (cleanup 후 자동 재취득)
+    ip link set "$IF_WAN0" up
 
-    # eth0: WAN — NM이 관리하므로 별도 DHCP 불필요 (cleanup 후 자동 재취득)
-    ip link set eth0 up
-
-    # eth1: LAN (고정 IP)
-    ip link set eth1 up
-    ip addr add "${LAN_IP}/${LAN_MASK}" dev eth1 2>/dev/null || true
+    # LAN (고정 IP)
+    ip link set "$IF_LAN0" up
+    ip addr add "${LAN_IP}/${LAN_MASK}" dev "$IF_LAN0" 2>/dev/null || true
 
     # dnsmasq 설정 활성화
-    cp "${CONF_DIR}/../dhcp-mode-a.conf.tpl" "$ACTIVE_CONF" 2>/dev/null || \
-        cp /usr/local/share/dhcp-toggle/dhcp-mode-a.conf "$ACTIVE_CONF"
+    cp /usr/local/share/dhcp-toggle/dhcp-mode-a.conf "$ACTIVE_CONF"
     systemctl restart dnsmasq
 
     # IP 포워딩
     sysctl -q net.ipv4.ip_forward=1
 
     # NAT
-    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-    iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
-    iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -t nat -A POSTROUTING -o "$IF_WAN0" -j MASQUERADE
+    iptables -A FORWARD -i "$IF_LAN0" -o "$IF_WAN0" -j ACCEPT
+    iptables -A FORWARD -i "$IF_WAN0" -o "$IF_LAN0" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     save_mode "a"
     restore_forwards
@@ -142,21 +153,18 @@ mode_a() {
 }
 
 mode_b() {
-    log_info "모드 B 활성화: wlan0=WAN, br0(eth0+eth1)=LAN"
-
-    # wlan은 건드리지 않음 — wlan0(STA)이 WAN으로 그대로 사용됨
-    # cleanup에서 이전 모드(c)의 NM 복원은 이미 처리됨
+    log_info "모드 B 활성화: ${IF_WLAN0}=WAN, br0(${IF_WAN0}+${IF_LAN0})=LAN"
 
     # br0 브릿지 생성
     ip link add name br0 type bridge
-    ip link set eth0 up
-    ip link set eth1 up
-    ip link set eth0 master br0
-    ip link set eth1 master br0
+    ip link set "$IF_WAN0" up
+    ip link set "$IF_LAN0" up
+    ip link set "$IF_WAN0" master br0
+    ip link set "$IF_LAN0" master br0
     ip link set br0 up
     ip addr add "${LAN_IP}/${LAN_MASK}" dev br0
 
-    log_info "br0 브릿지 생성 완료 (eth0 + eth1)"
+    log_info "br0 브릿지 생성 완료 (${IF_WAN0} + ${IF_LAN0})"
 
     # dnsmasq 설정 활성화
     cp /usr/local/share/dhcp-toggle/dhcp-mode-b.conf "$ACTIVE_CONF"
@@ -166,9 +174,9 @@ mode_b() {
     sysctl -q net.ipv4.ip_forward=1
 
     # NAT
-    iptables -t nat -A POSTROUTING -o wlan0 -j MASQUERADE
-    iptables -A FORWARD -i br0 -o wlan0 -j ACCEPT
-    iptables -A FORWARD -i wlan0 -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -t nat -A POSTROUTING -o "$IF_WLAN0" -j MASQUERADE
+    iptables -A FORWARD -i br0 -o "$IF_WLAN0" -j ACCEPT
+    iptables -A FORWARD -i "$IF_WLAN0" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     save_mode "b"
     restore_forwards
@@ -176,15 +184,14 @@ mode_b() {
 }
 
 mode_c() {
-    log_info "모드 C 활성화: eth0=WAN, br0(eth1+wlan0 AP)=LAN"
+    log_info "모드 C 활성화: ${IF_WAN0}=WAN, br0(${IF_LAN0}+${IF_WLAN0} AP)=LAN"
 
     # NetworkManager에서 wlan 분리 (hostapd 충돌 방지)
-    # disconnect 먼저 — 기존 STA 연결을 명시적으로 끊어야 hostapd가 wlan0을 점유 가능
-    nmcli device disconnect wlan0 2>/dev/null || true
-    nmcli device disconnect wlan1 2>/dev/null || true
-    nmcli device set wlan0 managed no 2>/dev/null || true
-    nmcli device set wlan1 managed no 2>/dev/null || true
-    ip link set wlan1 down 2>/dev/null || true
+    nmcli device disconnect "$IF_WLAN0" 2>/dev/null || true
+    [[ -n "${IF_WLAN1:-}" ]] && nmcli device disconnect "$IF_WLAN1" 2>/dev/null || true
+    nmcli device set "$IF_WLAN0" managed no 2>/dev/null || true
+    [[ -n "${IF_WLAN1:-}" ]] && nmcli device set "$IF_WLAN1" managed no 2>/dev/null || true
+    [[ -n "${IF_WLAN1:-}" ]] && ip link set "$IF_WLAN1" down 2>/dev/null || true
 
     # hostapd 설정 확인
     if [[ ! -f "$HOSTAPD_CONF" ]]; then
@@ -193,17 +200,17 @@ mode_c() {
         exit 1
     fi
 
-    # br0 브릿지 생성 (eth1만 먼저 추가, wlan0은 hostapd가 bridge= 옵션으로 추가)
+    # br0 브릿지 생성 (LAN만 먼저 추가, wlan은 hostapd가 bridge= 옵션으로 추가)
     ip link add name br0 type bridge
-    ip link set eth1 up
-    ip link set eth1 master br0
+    ip link set "$IF_LAN0" up
+    ip link set "$IF_LAN0" master br0
     ip link set br0 up
     ip addr add "${LAN_IP}/${LAN_MASK}" dev br0
 
-    log_info "br0 브릿지 생성 완료 (eth1)"
+    log_info "br0 브릿지 생성 완료 (${IF_LAN0})"
 
-    # hostapd 시작 (wlan0을 AP로 띄우고 br0에 자동 연결)
-    ip link set wlan0 up
+    # hostapd 시작 (wlan을 AP로 띄우고 br0에 자동 연결)
+    ip link set "$IF_WLAN0" up
     cp "$HOSTAPD_CONF" /etc/hostapd/hostapd.conf
     systemctl unmask hostapd 2>/dev/null || true
     if ! systemctl restart hostapd; then
@@ -211,10 +218,10 @@ mode_c() {
         cleanup
         exit 1
     fi
-    log_info "hostapd 시작 (wlan0 → AP)"
+    log_info "hostapd 시작 (${IF_WLAN0} → AP)"
 
-    # eth0: WAN — NM이 관리하므로 별도 DHCP 불필요 (cleanup 후 자동 재취득)
-    ip link set eth0 up
+    # WAN — NM이 관리하므로 별도 DHCP 불필요 (cleanup 후 자동 재취득)
+    ip link set "$IF_WAN0" up
 
     # dnsmasq 설정 활성화
     cp /usr/local/share/dhcp-toggle/dhcp-mode-c.conf "$ACTIVE_CONF"
@@ -224,9 +231,9 @@ mode_c() {
     sysctl -q net.ipv4.ip_forward=1
 
     # NAT
-    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-    iptables -A FORWARD -i br0 -o eth0 -j ACCEPT
-    iptables -A FORWARD -i eth0 -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -t nat -A POSTROUTING -o "$IF_WAN0" -j MASQUERADE
+    iptables -A FORWARD -i br0 -o "$IF_WAN0" -j ACCEPT
+    iptables -A FORWARD -i "$IF_WAN0" -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     save_mode "c"
     restore_forwards
@@ -239,8 +246,8 @@ get_wan_iface() {
     local mode
     mode=$(get_current_mode)
     case "$mode" in
-        a|c) echo "eth0" ;;
-        b) echo "wlan0" ;;
+        a|c) echo "$IF_WAN0" ;;
+        b) echo "$IF_WLAN0" ;;
         *) echo "" ;;
     esac
 }
@@ -254,9 +261,7 @@ init_forwards_file() {
 
 validate_port_spec() {
     local spec="$1"
-    # 단일 포트, 범위(N-M), 복수(N,M,O) 허용
     if [[ "$spec" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
-        # 단일 또는 범위
         local lo hi
         lo="${spec%%-*}"
         hi="${spec##*-}"
@@ -268,7 +273,6 @@ validate_port_spec() {
         fi
         return 0
     elif [[ "$spec" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
-        # 복수 포트
         IFS=',' read -ra ports <<< "$spec"
         for p in "${ports[@]}"; do
             if (( p < 1 || p > 65535 )); then
@@ -291,7 +295,6 @@ validate_ip() {
     return 1
 }
 
-# iptables용 포트 형식 변환: 80,443 → 80,443 / 8080-8090 → 8080:8090
 to_iptables_port() {
     local spec="$1"
     echo "${spec//-/:}"
@@ -318,7 +321,6 @@ apply_forward_rules() {
 
     for p in "${protos[@]}"; do
         if [[ "$ext_ports" == *","* ]]; then
-            # 복수 포트: multiport 사용, DNAT은 포트별로 적용 (동일 매핑)
             iptables -t nat -A PREROUTING -i "$wan_iface" -p "$p" \
                 -m multiport --dports "$ipt_ext" \
                 -j DNAT --to-destination "$int_ip" \
@@ -327,7 +329,6 @@ apply_forward_rules() {
                 -m multiport --dports "$ipt_int" -j ACCEPT \
                 -m comment --comment "fwd:$name" 2>/dev/null || true
         else
-            # 단일 포트 또는 범위
             iptables -t nat -A PREROUTING -i "$wan_iface" -p "$p" \
                 --dport "$ipt_ext" \
                 -j DNAT --to-destination "${int_ip}:${ipt_int}" \
@@ -341,7 +342,6 @@ apply_forward_rules() {
 
 remove_forward_rules() {
     local name="$1"
-    # comment 기반으로 규칙 제거
     while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "fwd:$name"; do
         local line
         line=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep "fwd:$name" | head -1 | awk '{print $1}')
@@ -384,7 +384,6 @@ restore_forwards() {
 }
 
 forward_add() {
-    # forward add <name> <ext_ports> <int_ip> <int_ports> [proto]
     local name="${1:-}" ext_ports="${2:-}" int_ip="${3:-}" int_ports="${4:-}" proto="${5:-tcp}"
 
     if [[ -z "$name" || -z "$ext_ports" || -z "$int_ip" || -z "$int_ports" ]]; then
@@ -395,13 +394,11 @@ forward_add() {
         return 1
     fi
 
-    # 이름 검증 (영문, 숫자, _, - 만 허용)
     if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
         log_error "규칙 이름은 영문, 숫자, _, - 만 사용 가능합니다: $name"
         return 1
     fi
 
-    # 포트 검증
     if ! validate_port_spec "$ext_ports"; then
         log_error "잘못된 외부 포트 형식: $ext_ports"
         return 1
@@ -411,13 +408,11 @@ forward_add() {
         return 1
     fi
 
-    # IP 검증
     if ! validate_ip "$int_ip"; then
         log_error "내부 IP는 192.168.10.1~254 범위여야 합니다: $int_ip"
         return 1
     fi
 
-    # 프로토콜 검증
     case "$proto" in
         tcp|udp|both) ;;
         *) log_error "프로토콜은 tcp, udp, both 중 하나: $proto"; return 1 ;;
@@ -425,13 +420,11 @@ forward_add() {
 
     init_forwards_file
 
-    # 중복 이름 검사
     if jq -e --arg n "$name" '.[] | select(.name == $n)' "$FORWARDS_FILE" >/dev/null 2>&1; then
         log_error "이미 존재하는 규칙 이름: $name"
         return 1
     fi
 
-    # JSON에 추가
     local tmp
     tmp=$(jq --arg n "$name" --arg ep "$ext_ports" --arg ip "$int_ip" \
              --arg ipt "$int_ports" --arg pr "$proto" \
@@ -441,7 +434,6 @@ forward_add() {
 
     log_info "포트포워딩 규칙 추가: $name ($ext_ports → $int_ip:$int_ports/$proto)"
 
-    # 현재 모드가 활성이면 즉시 iptables 적용
     local mode
     mode=$(get_current_mode)
     if [[ "$mode" != "off" ]]; then
@@ -466,10 +458,8 @@ forward_remove() {
         return 1
     fi
 
-    # iptables 규칙 제거
     remove_forward_rules "$name"
 
-    # JSON에서 제거
     local tmp
     tmp=$(jq --arg n "$name" '[.[] | select(.name != $n)]' "$FORWARDS_FILE")
     echo "$tmp" > "$FORWARDS_FILE"
@@ -498,12 +488,10 @@ forward_enable() {
         return 0
     fi
 
-    # JSON 업데이트
     local tmp
     tmp=$(jq --arg n "$name" '[.[] | if .name == $n then .enabled = true else . end]' "$FORWARDS_FILE")
     echo "$tmp" > "$FORWARDS_FILE"
 
-    # 모드가 활성이면 iptables 적용
     local mode
     mode=$(get_current_mode)
     if [[ "$mode" != "off" ]]; then
@@ -532,10 +520,8 @@ forward_disable() {
         return 1
     fi
 
-    # iptables 규칙 제거
     remove_forward_rules "$name"
 
-    # JSON 업데이트
     local tmp
     tmp=$(jq --arg n "$name" '[.[] | if .name == $n then .enabled = false else . end]' "$FORWARDS_FILE")
     echo "$tmp" > "$FORWARDS_FILE"
@@ -725,9 +711,8 @@ show_clients() {
         return
     fi
 
-    # LAN 인터페이스 결정
     case "$mode" in
-        a) lan_iface="eth1" ;;
+        a) lan_iface="$IF_LAN0" ;;
         b|c) lan_iface="br0" ;;
     esac
 
@@ -735,7 +720,6 @@ show_clients() {
     echo " 접속 클라이언트 목록 (모드: $mode)"
     echo "======================================"
 
-    # 1) DHCP 리스 (dnsmasq가 할당한 IP)
     echo ""
     echo "--- DHCP 할당 클라이언트 ---"
     local lease_file="/var/lib/misc/dnsmasq.leases"
@@ -751,7 +735,6 @@ show_clients() {
         echo "(DHCP 리스 없음)"
     fi
 
-    # 2) ARP 테이블 (실제 통신 중인 호스트)
     echo ""
     echo "--- ARP 테이블 (${lan_iface}) ---"
     printf "%-16s %-18s %s\n" "IP 주소" "MAC 주소" "상태"
@@ -762,7 +745,6 @@ show_clients() {
         fi
     done
 
-    # 3) 요약
     echo ""
     local dhcp_count arp_count
     dhcp_count=$(wc -l < "$lease_file" 2>/dev/null || echo 0)
@@ -778,6 +760,7 @@ show_status() {
     echo " DHCP Toggle 상태"
     echo "=============================="
     echo "현재 모드: $mode"
+    echo "인터페이스: WAN=${IF_WAN0}, LAN=${IF_LAN0}, WLAN=${IF_WLAN0}"
     echo ""
 
     echo "--- 인터페이스 ---"
@@ -821,25 +804,29 @@ show_log() {
 }
 
 show_help() {
-    cat <<'HELP'
+    cat <<HELP
 dhcp-toggle — DHCP 서버 모드 토글 스크립트
+
+현재 인터페이스 설정:
+  WAN: ${IF_WAN0}  |  LAN: ${IF_LAN0}  |  WLAN: ${IF_WLAN0}
+  설정 파일: ${CONFIG_FILE}
 
 사용법:
   sudo dhcp-toggle <command> [options]
 
 명령어:
   a           모드 A 활성화 — 유선 WAN
-              eth0=WAN (DHCP client), eth1=LAN (192.168.10.1/24)
-              [인터넷] → eth0 → NAT → eth1 → 클라이언트
+              ${IF_WAN0}=WAN (DHCP client), ${IF_LAN0}=LAN (${LAN_IP}/${LAN_MASK})
+              [인터넷] → ${IF_WAN0} → NAT → ${IF_LAN0} → 클라이언트
 
   b           모드 B 활성화 — Wi-Fi WAN
-              wlan0=WAN, br0(eth0+eth1)=LAN (192.168.10.1/24)
-              [인터넷] → wlan0 → NAT → br0 [eth0+eth1] → 클라이언트
+              ${IF_WLAN0}=WAN, br0(${IF_WAN0}+${IF_LAN0})=LAN (${LAN_IP}/${LAN_MASK})
+              [인터넷] → ${IF_WLAN0} → NAT → br0 [${IF_WAN0}+${IF_LAN0}] → 클라이언트
 
   c           모드 C 활성화 — AP 모드 (유선 WAN + Wi-Fi AP)
-              eth0=WAN, br0(eth1+wlan0 AP)=LAN (192.168.10.1/24)
-              [인터넷] → eth0 → NAT → br0 [eth1+wlan0(AP)] → 클라이언트
-              hostapd로 wlan0을 AP로 동작, 유/무선 클라이언트 모두 지원
+              ${IF_WAN0}=WAN, br0(${IF_LAN0}+${IF_WLAN0} AP)=LAN (${LAN_IP}/${LAN_MASK})
+              [인터넷] → ${IF_WAN0} → NAT → br0 [${IF_LAN0}+${IF_WLAN0}(AP)] → 클라이언트
+              hostapd로 ${IF_WLAN0}을 AP로 동작, 유/무선 클라이언트 모두 지원
 
   off         모든 DHCP/NAT 해제, 데스크톱 모드로 복귀
 
@@ -863,7 +850,7 @@ dhcp-toggle — DHCP 서버 모드 토글 스크립트
     status                    Web UI 상태 확인
 
   log [N]     최근 로그 출력 (기본 50줄)
-              로그 파일: /var/log/dhcp-toggle.log
+              로그 파일: ${LOG_FILE}
 
   help        이 도움말 출력
 
@@ -880,35 +867,28 @@ dhcp-toggle — DHCP 서버 모드 토글 스크립트
   dhcp-toggle status          # 현재 상태 확인
   dhcp-toggle clients         # 접속 장치 확인
   dhcp-toggle log             # 최근 로그 50줄
-  dhcp-toggle log 100         # 최근 로그 100줄
 
   sudo dhcp-toggle forward add http_s 80,443 192.168.10.101 80,443 tcp
-  sudo dhcp-toggle forward add game 25565 192.168.10.102 25565 both
-  sudo dhcp-toggle forward add cams 8080-8090 192.168.10.103 8080-8090 tcp
-  sudo dhcp-toggle forward enable http_s
-  sudo dhcp-toggle forward disable http_s
-  sudo dhcp-toggle forward remove http_s
-  dhcp-toggle forward list
+  sudo dhcp-toggle forward list
 
-  sudo dhcp-toggle webui on             # Web UI 시작
-  sudo dhcp-toggle webui off            # Web UI 중지
-  sudo dhcp-toggle webui port 9090      # 포트 변경
-  dhcp-toggle webui status              # Web UI 상태
+  sudo dhcp-toggle webui on
+  dhcp-toggle webui status
 
 네트워크 구성:
-  LAN IP:       192.168.10.1/24
+  LAN IP:       ${LAN_IP}/${LAN_MASK}
   DHCP 범위:    192.168.10.100 ~ 192.168.10.200
   DNS:          8.8.8.8, 8.8.4.4
   리스 시간:    12시간
 
 파일 위치:
+  설정:         ${CONFIG_FILE}
   스크립트:     /usr/local/bin/dhcp-toggle
-  설정 파일:    /usr/local/share/dhcp-toggle/
+  모드 설정:    /usr/local/share/dhcp-toggle/
   hostapd:      /usr/local/share/dhcp-toggle/hostapd.conf
   활성 설정:    /etc/dnsmasq.d/dhcp-active.conf
   상태 파일:    /var/lib/dhcp-toggle/mode
   포워딩 설정:  /var/lib/dhcp-toggle/forwards.json
-  로그 파일:    /var/log/dhcp-toggle.log
+  로그 파일:    ${LOG_FILE}
   systemd:      /etc/systemd/system/dhcp-toggle.service
 HELP
 }
@@ -958,9 +938,9 @@ case "${1:-}" in
     *)
         echo "사용법: dhcp-toggle {a|b|c|off|status|forward|webui|clients|log|help}"
         echo ""
-        echo "  a       — 모드 A: eth0=WAN, eth1=LAN (유선)"
-        echo "  b       — 모드 B: wlan0=WAN, eth0+eth1=LAN (Wi-Fi)"
-        echo "  c       — 모드 C: eth0=WAN, eth1+wlan0(AP)=LAN (AP)"
+        echo "  a       — 모드 A: ${IF_WAN0}=WAN, ${IF_LAN0}=LAN (유선)"
+        echo "  b       — 모드 B: ${IF_WLAN0}=WAN, ${IF_WAN0}+${IF_LAN0}=LAN (Wi-Fi)"
+        echo "  c       — 모드 C: ${IF_WAN0}=WAN, ${IF_LAN0}+${IF_WLAN0}(AP)=LAN (AP)"
         echo "  off     — DHCP 서버 해제 (데스크톱 모드)"
         echo "  status  — 현재 상태 확인"
         echo "  forward — 포트포워딩 규칙 관리 (add/remove/enable/disable/list)"
