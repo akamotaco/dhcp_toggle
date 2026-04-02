@@ -55,7 +55,6 @@ detect_interfaces() {
     IF_WAN0="${eths[0]}"
     IF_LAN0="${eths[1]}"
     IF_WLAN0="${wlans[0]:-}"
-    IF_WLAN1="${wlans[1]:-}"
     RUN_USER="${SUDO_USER:-$(logname 2>/dev/null || echo pi)}"
 
     # 기존 설정 파일이 있으면 로드하여 기본값으로 사용
@@ -71,7 +70,6 @@ detect_interfaces() {
     echo "  WAN (외부 네트워크):  ${IF_WAN0}"
     echo "  LAN (내부 네트워크):  ${IF_LAN0}"
     echo "  WLAN (무선):          ${IF_WLAN0:-없음}"
-    echo "  WLAN1 (보조 무선):    ${IF_WLAN1:-없음}"
     echo "  실행 사용자:          ${RUN_USER}"
     echo ""
 
@@ -89,8 +87,6 @@ detect_interfaces() {
             [[ -n "$input" ]] && IF_LAN0="$input"
             read -rp "WLAN 인터페이스 [${IF_WLAN0:-없음}]: " input
             [[ -n "$input" ]] && IF_WLAN0="$input"
-            read -rp "보조 WLAN 인터페이스 [${IF_WLAN1:-없음}]: " input
-            [[ -n "$input" ]] && IF_WLAN1="$input"
             read -rp "실행 사용자 [${RUN_USER}]: " input
             [[ -n "$input" ]] && RUN_USER="$input"
             echo ""
@@ -114,7 +110,6 @@ detect_interfaces() {
 IF_WAN0="${IF_WAN0}"
 IF_LAN0="${IF_LAN0}"
 IF_WLAN0="${IF_WLAN0}"
-IF_WLAN1="${IF_WLAN1}"
 RUN_USER="${RUN_USER}"
 CONF
 
@@ -126,7 +121,11 @@ detect_interfaces
 # 1. 필요 패키지 설치
 echo ""
 echo "[1/8] 패키지 확인..."
-apt-get install -y iptables jq hostapd python3-fastapi python3-uvicorn 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
+apt-get install -y dnsmasq iptables jq hostapd python3-fastapi python3-uvicorn 2>/dev/null || echo "패키지 설치 실패 — 수동 설치 필요"
+
+# dnsmasq: 자동시작 비활성화 (dhcp-toggle이 직접 관리)
+systemctl disable dnsmasq 2>/dev/null || true
+systemctl stop dnsmasq 2>/dev/null || true
 
 # hostapd: unmask (Ubuntu 기본 masked) + 자동시작 비활성화 (dhcp-toggle이 직접 관리)
 systemctl unmask hostapd 2>/dev/null || true

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/dhcp-toggle off
+ExecStart=/usr/local/bin/dhcp-toggle restore
 ExecStop=/usr/local/bin/dhcp-toggle off
 
 [Install]

@@ -16,8 +16,7 @@ source "$CONFIG_FILE"
 # 설정 파일에서 로드되는 변수:
 #   IF_WAN0    — 첫 번째 유선 인터페이스 (WAN용, 구 eth0)
 #   IF_LAN0    — 두 번째 유선 인터페이스 (LAN용, 구 eth1)
-#   IF_WLAN0   — 무선 인터페이스 (구 wlan0)
-#   IF_WLAN1   — 보조 무선 인터페이스 (구 wlan1, 없으면 빈값)
+#   IF_WLAN0   — 무선 인터페이스 (wlan이 여러 개여도 이것만 사용)
 #   RUN_USER   — 실행 사용자 (구 pi)
 
 CONF_DIR="/etc/dnsmasq.d"
@@ -79,9 +78,10 @@ save_mode() {
 }
 
 cleanup() {
-    local current
+    local current next_mode
     current=$(get_current_mode)
-    log_info "이전 모드($current) 정리 중..."
+    next_mode="${1:-off}"  # 다음 모드 (off이면 완전 정리, c이면 NM 복원 생략)
+    log_info "이전 모드($current) 정리 중... (다음: $next_mode)"
 
     # dnsmasq 정지
     systemctl stop dnsmasq 2>/dev/null || true
@@ -94,14 +94,12 @@ cleanup() {
     iptables -t nat -F POSTROUTING 2>/dev/null || true
     iptables -F FORWARD 2>/dev/null || true
 
-    # 모드 C 정리: hostapd 정지 + wlan 리셋 + NM 복원
-    if [[ "$current" == "c" ]]; then
-        systemctl stop hostapd 2>/dev/null || true
-        log_info "hostapd 정지 완료"
-        ip link set "$IF_WLAN0" down 2>/dev/null || true
-        [[ -n "${IF_WLAN1:-}" ]] && ip link set "$IF_WLAN1" down 2>/dev/null || true
+    # hostapd 정지 (모드 C 또는 비정상 종료 대비 — 항상 실행)
+    systemctl stop hostapd 2>/dev/null || true
+
+    # wlan NM 복원 — 다음 모드가 c가 아닐 때만 (c는 wlan을 AP로 전환하므로)
+    if [[ "$next_mode" != "c" ]]; then
         nmcli device set "$IF_WLAN0" managed yes 2>/dev/null || true
-        [[ -n "${IF_WLAN1:-}" ]] && nmcli device set "$IF_WLAN1" managed yes 2>/dev/null || true
         systemctl restart NetworkManager 2>/dev/null || true
         log_info "wlan NetworkManager 복원 완료"
     fi
@@ -188,10 +186,7 @@ mode_c() {
 
     # NetworkManager에서 wlan 분리 (hostapd 충돌 방지)
     nmcli device disconnect "$IF_WLAN0" 2>/dev/null || true
-    [[ -n "${IF_WLAN1:-}" ]] && nmcli device disconnect "$IF_WLAN1" 2>/dev/null || true
     nmcli device set "$IF_WLAN0" managed no 2>/dev/null || true
-    [[ -n "${IF_WLAN1:-}" ]] && nmcli device set "$IF_WLAN1" managed no 2>/dev/null || true
-    [[ -n "${IF_WLAN1:-}" ]] && ip link set "$IF_WLAN1" down 2>/dev/null || true
 
     # hostapd 설정 확인
     if [[ ! -f "$HOSTAPD_CONF" ]]; then
@@ -215,7 +210,7 @@ mode_c() {
     systemctl unmask hostapd 2>/dev/null || true
     if ! systemctl restart hostapd; then
         log_error "hostapd 시작 실패 — 모드 C 중단, 정리 중..."
-        cleanup
+        cleanup off
         exit 1
     fi
     log_info "hostapd 시작 (${IF_WLAN0} → AP)"
@@ -897,23 +892,34 @@ HELP
 case "${1:-}" in
     a)
         require_root
-        cleanup
+        cleanup a
         mode_a
         ;;
     b)
         require_root
-        cleanup
+        cleanup b
         mode_b
         ;;
     c)
         require_root
-        cleanup
+        cleanup c
         mode_c
         ;;
     off)
         require_root
-        cleanup
+        cleanup off
         log_info "DHCP 서버 비활성화 완료 (데스크톱 모드)"
+        ;;
+    restore)
+        require_root
+        saved=$(get_current_mode)
+        if [[ "$saved" != "off" && "$saved" =~ ^[abc]$ ]]; then
+            log_info "저장된 모드($saved) 복원 중..."
+            cleanup "$saved"
+            mode_"$saved"
+        else
+            log_info "저장된 모드: off — 복원 불필요"
+        fi
         ;;
     status)
         show_status
