@@ -97,11 +97,16 @@ cleanup() {
     # hostapd 정지 (모드 C 또는 비정상 종료 대비 — 항상 실행)
     systemctl stop hostapd 2>/dev/null || true
 
-    # wlan NM 복원 — 다음 모드가 c가 아닐 때만 (c는 wlan을 AP로 전환하므로)
-    if [[ "$next_mode" != "c" ]]; then
+    # wlan NM 복원 — 이전 모드가 c였고, 다음 모드가 c가 아닐 때만
+    if [[ "$current" == "c" && "$next_mode" != "c" ]]; then
+        ip link set "$IF_WLAN0" down 2>/dev/null || true
         nmcli device set "$IF_WLAN0" managed yes 2>/dev/null || true
-        systemctl restart NetworkManager 2>/dev/null || true
-        log_info "wlan NetworkManager 복원 완료"
+        nmcli device reapply "$IF_WLAN0" 2>/dev/null || true
+        ip link set "$IF_WLAN0" up 2>/dev/null || true
+        # NM에 autoconnect 트리거
+        nmcli connection up "$(nmcli -t -f NAME,DEVICE,TYPE connection show | grep wireless | head -1 | cut -d: -f1)" 2>/dev/null || \
+            nmcli device connect "$IF_WLAN0" 2>/dev/null || true
+        log_info "wlan NM 복원 완료 ($IF_WLAN0)"
     fi
 
     # 브릿지 제거 (모드 B/C 정리)
@@ -113,8 +118,7 @@ cleanup() {
         log_info "br0 브릿지 제거 완료"
     fi
 
-    # 인터페이스 IP 제거 (wlan은 건드리지 않음 — NM이 관리)
-    ip addr flush dev "$IF_WAN0" 2>/dev/null || true
+    # LAN 인터페이스 IP 제거 (WAN은 NM이 관리하므로 건드리지 않음)
     ip addr flush dev "$IF_LAN0" 2>/dev/null || true
 
     # IP 포워딩 비활성
